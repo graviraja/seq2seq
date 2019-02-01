@@ -64,6 +64,46 @@ print('Vocab builded...')
 BATCH_SIZE = 32
 
 # create data iterators for the data
-# padding all the sentences to same length, replacing words by its index, 
+# padding all the sentences to same length, replacing words by its index,
 # bucketing (minimizes the amount of padding by grouping similar length sentences)
 train_iterator, valid_iterator, test_iterator = BucketIterator.splits((train_data, valid_data, test_data), batch_size=BATCH_SIZE)
+
+
+class Encoder(nn.Module):
+    ''' Sequence to sequence networks consists of Encoder and Decoder modules.
+    This class contains the implementation of Encoder module.
+
+    Args:
+        input_dim: A integer indicating the size of input dimension.
+        emb_dim: A integer indicating the size of embeddings.
+        hidden_dim: A integer indicating the hidden dimension of RNN layers.
+        n_layers: A integer indicating the number of layers.
+        dropout: A float indicating dropout.
+    '''
+    def __init__(self, input_dim, emb_dim, hidden_dim, n_layers, dropout):
+        self.input_dim = input_dim
+        self.emb_dim = emb_dim
+        self.hidden_dim = hidden_dim
+        self.n_layers = n_layers
+        self.dropout = dropout
+
+        self.embedding = nn.Embedding(input_dim, emb_dim)
+        self.rnn = nn.LSTM(emb_dim, hidden_dim, n_layers, dropout=dropout)  # default is time major
+        self.dropout = dropout
+
+    def forward(self, src):
+        # src is of shape [sentence_length, batch_size], it is time major
+
+        # embedded is of shape [sentence_length, batch_size, embedding_size]
+        embedded = self.embedding(src)
+        embedded = self.dropout(embedded)
+
+        # inputs to the rnn is input, (h, c); if hidden, cell states are not passed means default initializes to zero.
+        # input is of shape [sequence_length, batch_size, input_size]
+        # hidden is of shape [num_layers * num_directions, batch_size, hidden_size]
+        # cell is of shape [num_layers * num_directions, batch_size, hidden_size]
+        outputs, (hidden, cell) = self.rnn(embedded) 
+
+        # outputs are always from the top hidden layer, if bidirectional outputs are concatenated.
+        # outputs shape [sequence_length, batch_size, hidden_dim * num_directions]
+        return hidden, cell
