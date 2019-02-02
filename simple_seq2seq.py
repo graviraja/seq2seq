@@ -114,8 +114,8 @@ class Decoder(nn.Module):
     ''' This class contains the implementation of Decoder Module.
 
     Args:
-        output_dim: A integer indicating the size of output dimension.
         embedding_dim: A integer indicating the embedding size.
+        output_dim: A integer indicating the size of output dimension.
         hidden_dim: A integer indicating the hidden size of rnn.
         n_layers: A integer indicating the number of layers in rnn.
         dropout: A float indicating the dropout.
@@ -161,3 +161,45 @@ class Decoder(nn.Module):
         # predicted shape is [batch_size, output_dim]
 
         return predicted, hidden, cell
+
+
+class Seq2Seq(nn.Module):
+    ''' This class contains the implementation of complete sequence to sequence network.
+    It uses to encoder to produce the context vectors.
+    It uses the decoder to produce the predicted target sentence.
+
+    Args:
+        encoder: A Encoder class instance.
+        decoder: A Decoder class instance.
+    '''
+    def __init__(self, encoder, decoder):
+        self.encoder = encoder
+        self.decoder = decoder
+
+    def forward(self, src, trg, teacher_forcing_ratio=0.5):
+        # src is of shape [sequence_len, batch_size]
+        # trg is of shape [sequence_len, batch_size]
+        # if teacher_forcing_ratio is 0.5 we use ground-truth inputs 50% of time and 50% time we use decoder outputs.
+
+        batch_size = trg.shape[1]
+        max_len = trg.shape[0]
+        trg_vocab_size = self.decoder.output_dim
+
+        # to store the outputs of the decoder
+        outputs = torch.zeros(max_len, batch_size, trg_vocab_size)
+
+        # context vector, last hidden and cell state of encoder to initialize the decoder
+        hidden, cell = self.encoder(src)
+
+        # first input to the decoder is the <sos> tokens
+        input = trg[0, :]
+
+        for t in range(1, max_len):
+            output, hidden, cell = self.decoder(input, hidden, cell)
+            outputs[t] = output
+            use_teacher_force = random.random() < teacher_forcing_ratio
+            top1 = output.max(1)[1]
+            input = (trg[t] if use_teacher_force else top1)
+
+        # outputs is of shape [sequence_len, batch_size, output_dim]
+        return outputs
