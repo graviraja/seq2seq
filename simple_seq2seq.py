@@ -90,7 +90,7 @@ class Encoder(nn.Module):
 
         self.embedding = nn.Embedding(input_dim, emb_dim)
         self.rnn = nn.LSTM(emb_dim, hidden_dim, n_layers, dropout=dropout)  # default is time major
-        self.dropout = dropout
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, src):
         # src is of shape [sentence_length, batch_size], it is time major
@@ -173,6 +173,7 @@ class Seq2Seq(nn.Module):
         decoder: A Decoder class instance.
     '''
     def __init__(self, encoder, decoder):
+        super().__init__()
         self.encoder = encoder
         self.decoder = decoder
 
@@ -203,3 +204,133 @@ class Seq2Seq(nn.Module):
 
         # outputs is of shape [sequence_len, batch_size, output_dim]
         return outputs
+
+INPUT_DIM = len(SRC.vocab)
+OUTPUT_DIM = len(TRG.vocab)
+ENC_EMB_DIM = 256   # encoder embedding size
+DEC_EMB_DIM = 256   # decoder embedding size (can be different from encoder embedding size)
+HID_DIM = 512       # hidden dimension (must be same for encoder & decoder)
+N_LAYERS = 2        # number of rnn layers (must be same for encoder & decoder)
+ENC_DROPOUT = 0.5   # encoder dropout
+DEC_DROPOUT = 0.5   # decoder dropout (can be different from encoder droput)
+
+# encoder
+enc = Encoder(INPUT_DIM, ENC_EMB_DIM, HID_DIM, N_LAYERS, ENC_DROPOUT)
+# decoder
+dec = Decoder(DEC_EMB_DIM, OUTPUT_DIM, HID_DIM, N_LAYERS, DEC_DROPOUT)
+# model
+model = Seq2Seq(enc, dec)
+
+optimizer = optim.Adam(model.parameters())
+pad_idx = TRG.vocab.stoi['<pad>']
+# loss function calculates the average loss per token
+# passing the <pad> token to ignore_idx argument, we will ignore loss whenever the target token is <pad>
+criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
+
+
+def train(model, iterator, optimizer, criterion, clip):
+    ''' Training loop for the model to train.
+
+    Args:
+        model: A Seq2Seq model instance.
+        iterator: A DataIterator to read the data.
+        optimizer: Optimizer for the model.
+        criterion: loss criterion.
+        clip: gradient clip value.
+
+    Returns:
+        epoch_loss: Average loss of the epoch.
+    '''
+    #  some layers have different behavior during train/and evaluation (like BatchNorm, Dropout) so setting it matters.
+    model.train()
+    # loss
+    epoch_loss = 0
+
+    for i, batch in enumerate(iterator):
+        src = batch.src
+        trg = batch.trg
+
+        optimizer.zero_grad()
+
+        # trg is of shape [sequence_len, batch_size]
+        # output is of shape [sequence_len, batch_size, output_dim]
+        output = model(src, trg)
+
+        # loss function works only 2d logits, 1d targets
+        # so flatten the trg, output tensors. Ignore the <sos> token
+        # trg shape shape should be [(sequence_len - 1) * batch_size]
+        # output shape should be [(sequence_len - 1) * batch_size, output_dim]
+        loss = criterion(output[1:].view(-1, output.shape[2]), trg[1:].view(-1))
+
+        # backward pass
+        loss.backward()
+
+        # clip the gradients
+        torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
+
+        # update the parameters
+        optimizer.step()
+
+        epoch_loss += loss.item()
+
+    # return the average loss
+    return epoch_loss / len(iterator)
+
+
+def evaluate(model, iterator, criterion):
+    ''' Evaluation loop for the model to evaluate.
+
+    Args:
+        model: A Seq2Seq model instance.
+        iterator: A DataIterator to read the data.
+        criterion: loss criterion.
+
+    Returns:
+        epoch_loss: Average loss of the epoch.
+    '''
+    #  some layers have different behavior during train/and evaluation (like BatchNorm, Dropout) so setting it matters.
+    model.eval()
+    # loss
+    epoch_loss = 0
+
+    # we don't need to update the model parameters. only forward pass.
+    with torch.no_grad():
+        for i, batch in enumerate(iterator):
+            src = batch.src
+            trg = batch.trg
+
+            output = model(src, trg, 0)     # turn off the teacher forcing
+
+            # loss function works only 2d logits, 1d targets
+            # so flatten the trg, output tensors. Ignore the <sos> token
+            # trg shape shape should be [(sequence_len - 1) * batch_size]
+            # output shape should be [(sequence_len - 1) * batch_size, output_dim]
+            loss = criterion(output[1:].view(-1, output.shape[2]), trg[1:].view(-1))
+
+            epoch_loss += loss.item()
+    return epoch_loss / len(iterator)
+
+
+N_EPOCHS = 10           # number of epochs
+CLIP = 10               # gradient clip value
+SAVE_DIR = 'models'     # directory name to save the models.
+MODEL_SAVE_PATH = os.path.join(SAVE_DIR, 'seq2seq_model.pt')
+
+best_validation_loss = float('inf')
+
+if not os.path.isdir(f'{SAVE_DIR}'):
+    os.makedirs(f'{SAVE_DIR}')
+
+for epoch in range(N_EPOCHS):
+    train_loss = train(model, train_iterator, optimizer, criterion, CLIP)
+    valid_loss = evaluate(model, valid_iterator, criterion)
+
+    if valid_loss < best_validation_loss:
+        best_validation_loss = valid_loss
+        torch.save(model.state_dict(), MODEL_SAVE_PATH)
+        print(f'| Epoch: {epoch+1:03} | Train Loss: {train_loss:.3f} | Train PPL: {math.exp(train_loss):7.3f} | Val. Loss: {valid_loss:.3f} | Val. PPL: {math.exp(valid_loss):7.3f} |')
+
+# load the parameters(state_dict) that gave the best validation loss and run the model to test.
+model.load_state_dict(torch.load(MODEL_SAVE_PATH))
+test_loss = evaluate(model, test_iterator, criterion)
+print(f'| Test Loss: {test_loss:.3f} | Test PPL: {math.exp(test_loss):7.3f} |')
