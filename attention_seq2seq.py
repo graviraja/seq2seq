@@ -10,7 +10,7 @@ import spacy
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.functional as F
+import torch.nn.functional as F
 
 from torchtext.datasets import Multi30k, TranslationDataset
 from torchtext.data import Field, BucketIterator
@@ -201,7 +201,7 @@ class Decoder(nn.Module):
         # hidden is of shape [batch_size, hidden_dim]
         # encoder_outputs is of shape [sequence_len, batch_size, hidden_dim * num_directions]
 
-        input = input.unfreeze(0)
+        input = input.unsqueeze(0)
         # input shape is [1, batch_size]. reshape is needed rnn expects a rank 3 tensors as input.
         # so reshaping to [1, batch_size] means a batch of batch_size each containing 1 index.
 
@@ -242,3 +242,180 @@ class Decoder(nn.Module):
         # output shape is [batch_size, output_dim]
 
         return output, hidden.squeeze(0)
+
+
+class Seq2Seq(nn.Module):
+    ''' This class contains the implementation of Sequence to sequence model.
+    By using the Encoder, Decoder class instances.
+
+    Args:
+        encoder: A Encoder class instance.
+        decoder: A Decoder class instance.
+        device: device type to use.
+    '''
+    def __init__(self, encoder, decoder, device):
+        super().__init__()
+
+        self.encoder = encoder
+        self.decoder = decoder
+        self.device = device
+
+    def forward(self, src, trg, teacher_forcing_ratio=0.5):
+        # src is of shape [sequence_len, batch_size]
+        # trg is of shape [sequence_len, batch_size]
+        # if teacher_forcing_ratio is 0.5 we use ground-truth inputs 50% of time and 50% time we use decoder outputs.
+
+        batch_size = src.shape[1]
+        max_len = trg.shape[0]
+        trg_vocab_size = self.decoder.output_dim
+
+        # to store the outputs of decoder
+        outputs = torch.zeros(max_len, batch_size, trg_vocab_size).to(self.device)
+
+        # encoder_outputs is of shape [sequence_len, batch_size, hidden_dim * num_directions]
+        # hidden is of shape [num_layers * num_directions, batch_size, hidden_dim]
+        # after processing through encoder,
+        # encoder_outputs is of shape [sequence_len, batch_size, hidden_dim * 2]
+        # hidden is of shape [batch_size, decoder_hidden_dim], since actual hidden states are passed through a linear layer.
+        encoder_outputs, hidden = self.encoder(src)
+
+        # first input to the decoder is always <sos> token
+        input = trg[0, :]
+
+        for t in range(1, max_len):
+            output, hidden = self.decoder(input, hidden, encoder_outputs)
+            outputs[t] = output
+            use_teacher_force = random.random() < teacher_forcing_ratio
+            top1 = output.max(1)[1]
+            input = (trg[t] if use_teacher_force else top1)
+
+        return outputs
+
+
+INPUT_DIM = len(SRC.vocab)
+OUTPUT_DIM = len(TRG.vocab)
+ENC_EMB_DIM = 256
+DEC_EMB_DIM = 256
+ENC_HID_DIM = 512
+DEC_HID_DIM = 512
+ENC_DROPOUT = 0.5
+DEC_DROPOUT = 0.5
+
+attn = Attention(ENC_HID_DIM, DEC_HID_DIM)
+enc = Encoder(INPUT_DIM, ENC_EMB_DIM, ENC_HID_DIM, DEC_HID_DIM, ENC_DROPOUT)
+dec = Decoder(OUTPUT_DIM, DEC_EMB_DIM, ENC_HID_DIM, DEC_HID_DIM, DEC_DROPOUT, attn)
+
+model = Seq2Seq(enc, dec, device).to(device)
+
+optimizer = optim.Adam(model.parameters())
+pad_idx = TRG.vocab.stoi['<pad>']
+criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
+
+
+def train(model, iterator, optimizer, criterion, clip):
+    ''' Training loop for the model to train.
+
+    Args:
+        model: A Seq2Seq model instance.
+        iterator: A DataIterator to read the data.
+        optimizer: Optimizer for the model.
+        criterion: loss criterion.
+        clip: gradient clip value.
+
+    Returns:
+        epoch_loss: Average loss of the epoch.
+    '''
+    #  some layers have different behavior during train/and evaluation (like BatchNorm, Dropout) so setting it matters.
+    model.train()
+    # loss
+    epoch_loss = 0
+
+    for i, batch in enumerate(iterator):
+        src = batch.src
+        trg = batch.trg
+
+        optimizer.zero_grad()
+
+        # trg is of shape [sequence_len, batch_size]
+        # output of shape [sequence_len, batch_size, output_dim]
+        output = model(src, trg)
+
+        # loss function works only 2d logits, 1d targets
+        # so flatten the trg, output tensors. Ignore the <sos> token
+        # trg shape shape should be [(sequence_len - 1) * batch_size]
+        # output shape should be [(sequence_len - 1) * batch_size, output_dim]
+        loss = criterion(output[1:].view(-1, output.shape[2]), trg[1:].view(-1))
+
+        # backward pass
+        loss.backward()
+
+        # gradient clipping
+        torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
+
+        # weight update
+        optimizer.step()
+
+        epoch_loss += loss.item()
+
+    # return the average loss
+    return epoch_loss / len(iterator)
+
+
+def evaluate(model, iterator, criterion):
+    ''' Evaluation loop for the model to evaluate.
+
+    Args:
+        model: A Seq2Seq model instance.
+        iterator: A DataIterator to read the data.
+        criterion: loss criterion.
+
+    Returns:
+        epoch_loss: Average loss of the epoch.
+    '''
+    #  some layers have different behavior during train/and evaluation (like BatchNorm, Dropout) so setting it matters.
+    model.eval()
+    # loss
+    epoch_loss = 0
+
+    # we don't need to update the model parameters. only forward pass.
+    with torch.no_grad():
+        for i, batch in enumerate(iterator):
+            src = batch.src
+            trg = batch.trg
+
+            output = model(src, trg, 0)     # turn off the teacher forcing
+
+            # loss function works only 2d logits, 1d targets
+            # so flatten the trg, output tensors. Ignore the <sos> token
+            # trg shape shape should be [(sequence_len - 1) * batch_size]
+            # output shape should be [(sequence_len - 1) * batch_size, output_dim]
+            loss = criterion(output[1:].view(-1, output.shape[2]), trg[1:].view(-1))
+
+            epoch_loss += loss.item()
+    return epoch_loss / len(iterator)
+
+N_EPOCHS = 10           # number of epochs
+CLIP = 10               # gradient clip value
+SAVE_DIR = 'models'     # directory name to save the models.
+MODEL_SAVE_PATH = os.path.join(SAVE_DIR, 'attention_model.pt')
+
+best_valid_loss = float('inf')
+
+if not os.path.isdir(f'{SAVE_DIR}'):
+    os.makedirs(f'{SAVE_DIR}')
+
+for epoch in range(N_EPOCHS):
+
+    train_loss = train(model, train_iterator, optimizer, criterion, CLIP)
+    valid_loss = evaluate(model, valid_iterator, criterion)
+
+    if valid_loss < best_valid_loss:
+        best_valid_loss = valid_loss
+        torch.save(model.state_dict(), MODEL_SAVE_PATH)
+
+    print(f'| Epoch: {epoch+1:03} | Train Loss: {train_loss:.3f} | Train PPL: {math.exp(train_loss):7.3f} | Val. Loss: {valid_loss:.3f} | Val. PPL: {math.exp(valid_loss):7.3f} |')
+
+# load the parameters(state_dict) that gave the best validation loss and run the model to test.
+model.load_state_dict(torch.load(MODEL_SAVE_PATH))
+test_loss = evaluate(model, test_iterator, criterion)
+print(f'| Test Loss: {test_loss:.3f} | Test PPL: {math.exp(test_loss):7.3f} |')
