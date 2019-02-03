@@ -121,6 +121,7 @@ class Encoder(nn.Module):
 
 class Attention(nn.Module):
     ''' This class implements the attention mechanism.
+    By taking the encoder outputs and decoder hidden state.
 
     Args:
         enc_hidden_dim: A integer indicating the encoder hidden dimension.
@@ -166,3 +167,78 @@ class Attention(nn.Module):
         # attention is of shape [batch_size, sequence_len]
 
         return F.softmax(attention, dim=1)
+
+
+class Decoder(nn.Module):
+    ''' This class implements the Decoder module.
+    By using the attention vector produced by the Attention class.
+
+    Args:
+        output_dim: A integer indicating the output dimension.
+        embedding_dim: A integer indicating the embedding size.
+        enc_hidden_dim: A integer indicating the hidden dimension of encoder.
+        dec_hidden_dim: A integer indicating the hidden dimension of decoder.
+        dropout: A float indicating the amount of dropout.
+        attention: A Attention class instance for calculating the attention vector.
+    '''
+    def __init__(self, output_dim, embedding_dim, enc_hidden_dim, dec_hidden_dim, dropout, attention):
+        super().__init__()
+
+        self.output_dim = output_dim
+        self.embedding_dim = embedding_dim
+        self.enc_hidden_dim = enc_hidden_dim
+        self.dec_hidden_dim = dec_hidden_dim
+        self.dropout = dropout
+        self.attention = attention
+
+        self.embedding = nn.Embedding(output_dim, embedding_dim)
+        self.rnn = nn.GRU((enc_hidden_dim * 2) + embedding_dim, dec_hidden_dim)
+        self.out = nn.Linear((enc_hidden_dim * 2) + (dec_hidden_dim + embedding_dim), output_dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, input, hidden, encoder_outputs):
+        # input is of shape [batch_size]
+        # hidden is of shape [batch_size, hidden_dim]
+        # encoder_outputs is of shape [sequence_len, batch_size, hidden_dim * num_directions]
+
+        input = input.unfreeze(0)
+        # input shape is [1, batch_size]. reshape is needed rnn expects a rank 3 tensors as input.
+        # so reshaping to [1, batch_size] means a batch of batch_size each containing 1 index.
+
+        embedded = self.embedding(input)
+        # embedded is of shape [1, batch_size, embedding_dim]
+        embedded = self.dropout(embedded)
+
+        a = self.attention(hidden, encoder_outputs)
+        # a is of shape [batch_size, sequence_len]
+        a = a.unsqueeze(1)
+        # a shape is [batch_size, 1, sequence_len]
+
+        encoder_outputs = encoder_outputs.permute(1, 0, 2)
+        # encoder_outputs shape is [batch_size, sequence_len, enc_hidden_dim * 2]
+
+        weighted = torch.bmm(a, encoder_outputs)
+        # weighted shape is [batch_size, 1, enc_hidden_dim * 2]
+        weighted = weighted.permute(1, 0, 2)
+        # weighted shape is [1, batch_size, enc_hidden_dim * 2]
+
+        rnn_input = torch.cat((embedded, weighted), dim=2)
+        # rnn_input shape is [1, batch_size, (enc_hidden_dim * 2) + embedding_dim]
+
+        output, hidden = self.rnn(rnn_input, hidden.unsqueeze(0))
+        # output = [sent len, batch size, dec hid dim * n directions]
+        # hidden = [n layers * n directions, batch size, dec hid dim]
+
+        # sent len, n layers and n directions will always be 1 in this decoder, therefore:
+        # output = [1, batch size, dec hid dim]
+        # hidden = [1, batch size, dec hid dim]
+        # this also means that output == hidden
+
+        embedded = embedded.squeeze(0)  # [batch_size, embedding_dim]
+        output = output.squeeze(0)      # [batch_size, dec_hidden_dim]
+        weighted = weighted.squeeze(0)  # [batch_size, enc_hidden_dim * 2]
+
+        output = self.out(torch.cat((output, weighted, embedded), dim=1))
+        # output shape is [batch_size, output_dim]
+
+        return output, hidden.squeeze(0)
