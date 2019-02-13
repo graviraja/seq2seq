@@ -163,6 +163,10 @@ class Attention(nn.Module):
         v = v.unsqueeze(1)
         # v is of shape [batch_size, 1, dec_hidden_dim]
 
+        # batch matrix multiplication
+        # v          => [batch_size, 1, dec_hidden_dim]
+        # energy     => [batch_size, dec_hidden_dim, sequence_len]
+        # v * energy => [batch_size, 1, sequence_len]
         attention = torch.bmm(v, energy).squeeze(1)
         # attention is of shape [batch_size, sequence_len]
 
