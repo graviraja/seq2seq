@@ -13,8 +13,12 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
+import torchtext
 from torchtext.datasets import Multi30k, TranslationDataset
 from torchtext.data import Field, BucketIterator
+
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 
 # set the random seed to have deterministic results
 SEED = 1
@@ -43,7 +47,8 @@ def tokenize_en(text):
 # use the tokenize_de, tokenize_en for tokenization of german and english sentences.
 # German is the src, English is the trg
 # append the <sos> (start of sentence), <eos> (end of sentence) tokens to all sentences.
-SRC = Field(tokenize=tokenize_de, init_token='<sos>', eos_token='<eos>', lower=True)
+# include_lengths=True, will return the length of sentences before padding them to same length
+SRC = Field(tokenize=tokenize_de, init_token='<sos>', eos_token='<eos>', lower=True, include_lengths=True)
 TRG = Field(tokenize=tokenize_en, init_token='<sos>', eos_token='<eos>', lower=True)
 
 
@@ -104,6 +109,7 @@ class Encoder(nn.Module):
         # src_len is [len_of_each_sentence_in_batch]
 
         embedded = self.embedding(src)
+        embedded = self.dropout(embedded)
         # embedded is of shape [sequence_len, batch_size, embedding_dim]
 
         pack_embedded = nn.utils.rnn.pack_padded_sequence(embedded, src_len)
@@ -112,13 +118,13 @@ class Encoder(nn.Module):
 
         outputs, _ = nn.utils.rnn.pad_packed_sequence(packed_outputs)
         # outputs shape is [sequence_len, batch_size, hidden_dim * num_dir]
-        # hidden shape is [num_layers * num_dir, batch_size, hidden_dim]
+        # hidden shape is [num_layers * num_dir, batch_size, hidden_dim] => [2, batch_size, hidden_dim]
 
         # hidden is stacked => [forward_1, backward_1, forward_2, backward_2, ...]
         # outputs are always from last layer
 
-        # hidden [-2, :, :] => last of the forward rnn
-        # hidden [-1, :, :] => last of the backward rnn
+        # hidden [0, :, :] => last of the forward rnn
+        # hidden [1, :, :] => last of the backward rnn
 
         hidden = torch.tanh(self.fc(torch.cat((hidden[-2, :, :], hidden[-1, :, :]), dim=1)))
 
@@ -128,13 +134,20 @@ class Encoder(nn.Module):
 
 
 class Attention(nn.Module):
+    '''This class contains the implementation of Attention.
+
+    Args:
+        encoder_hidden_dim: A integer indicating the hidden dimension of encoder.
+        decoder_hidden_dim: A integer indicating the hidden dimension of decoder.
+    '''
     def __init__(self, encoder_hidden_dim, decoder_hidden_dim):
         super().__init__()
 
         self.encoder_hidden_dim = encoder_hidden_dim
         self.decoder_hidden_dim = decoder_hidden_dim
 
-        self.attn = nn.Linear(encoder_hidden_dim * 2 + decoder_hidden_dim, decoder_hidden_dim)
+        # since encoder is bidirectional, output shape contains enc_hidden_dim * 2
+        self.attn = nn.Linear((encoder_hidden_dim * 2) + decoder_hidden_dim, decoder_hidden_dim)
         self.v = nn.Parameter(torch.rand(decoder_hidden_dim))
 
     def forward(self, decoder_hidden_state, encoder_outputs, mask):
@@ -142,6 +155,7 @@ class Attention(nn.Module):
         # since decoder_hidden_state is calculated per time step
         # encoder_outputs shape is [sequence_len, batch_size, encoder_hidden_dim * 2]
         # since encoder is bidirectional
+        # mask is [batch_size, sequence_len]
 
         batch_size = encoder_outputs.shape[1]
         sequence_len = encoder_outputs.shape[0]
@@ -160,6 +174,9 @@ class Attention(nn.Module):
         # energy shape is [batch_size, sequence_len, decoder_hidden_dim]
         # reshape the energy into [batch_size, decoder_hidden_dim, sequence_len]
         # which then becomes suitable for matrix multiplication with v to get the a
+        energy = energy.permute(0, 2, 1)
+
+        # v shape is [decoder_hidden_dim]
         v = self.v.repeat(batch_size, 1)
         # v shape is [batch_size, decoder_hidden_dim]
 
@@ -173,18 +190,36 @@ class Attention(nn.Module):
         # v * energy => [batch_size, 1, sequence_len]
         attention = torch.bmm(v, energy).squeeze(1)
 
+        # we need to consider attention only for the values whose mask != 0
         attention = attention.masked_fill(mask == 0, -1e10)
         # attention shape is [batch_size, sequence_len]
         return F.softmax(attention, dim=1)
 
 
 class Decoder(nn.Module):
+    '''This class contains the implementation of Decoder.
+
+    This implements a unidirectional GRU.
+
+    Args:
+        output_dim: A integer indicating the output dimension.
+        emb_dim: A integer indicating the embedding dimension.
+        enc_hid_dim: A integer indicating the hidden dimension of encoder.
+        dec_hid_dim: A integer indicating the hidden dimension of decoder.
+        dropout: A float indicating the amount of dropout.
+        attention: A Attention class instance.
+    '''
     def __init__(self, output_dim, emb_dim, enc_hid_dim, dec_hid_dim, dropout, attention):
         super().__init__()
 
         self.output_dim = output_dim
+        self.attention = attention
         self.embedding = nn.Embedding(output_dim, emb_dim)
+
+        # context vector concatenated with input word embedding vector is passed as input to rnn
         self.rnn = nn.GRU((enc_hid_dim * 2) + emb_dim, dec_hid_dim)
+
+        # context vector concatenated with hidden state and input word embedding, is passed to output layer to predict next word
         self.out = nn.Linear((enc_hid_dim * 2) + emb_dim + dec_hid_dim, output_dim)
         self.dropout = nn.Dropout(dropout)
 
@@ -214,12 +249,13 @@ class Decoder(nn.Module):
         # enc_out     => [batch_size, seq_len, enc_hid_dim * 2]
         # a * enc_out => [batch_size, 1, enc_hid_dim * 2]
         weighted = torch.bmm(a, encoder_outputs)
+        # weighted is also called as context vector
         # weighted shape is [batch_size, 1, enc_hidden_dim * 2]
 
         weighted = weighted.permute(1, 0, 2)
         # weighted shape is [1, batch_size, enc_hidden_dim * 2], time major
         # reshaping is needed, so it can be concatenated with embedded to pass to rnn
-        rnn_input = torch.cat((weighted, embedded), dim=2)
+        rnn_input = torch.cat((embedded, weighted), dim=2)
         # rnn_input shape is [1, batch_size, (enc_hidden_dim * 2 + emb_dim)]
 
         output, hidden = self.rnn(rnn_input, hidden.unsqueeze(0))
@@ -232,13 +268,27 @@ class Decoder(nn.Module):
         embedded = embedded.squeeze(0)
         weighted = weighted.squeeze(0)
 
-        output = self.out(torch.cat((output, embedded, weighted), dim=1))
-        # output shape is [batch_size, output_dim]
+        output = self.out(torch.cat((output, weighted, embedded), dim=1))
 
+        # output shape is [batch_size, output_dim]
+        # hidden shape is [batch_size, dec_hidden_dim]
+        # a shape is [batch_size, sequence_len]
         return output, hidden.squeeze(0), a.squeeze(1)
 
 
 class Seq2Seq(nn.Module):
+    '''This class contains the implementation Sequence to Sequence Module.
+
+    This takes an Encoder instance and a Decoder instance and combines them to form the seq-to-seq module.
+
+    Args:
+        encoder: A Encoder class instance.
+        decoder: A Decoder class instance.
+        pad_idx: <PAD> token index.
+        sos_idx: <SOS> token index.
+        eos_idx: <EOS> token index.
+        device: To indicate which device to use.
+    '''
     def __init__(self, encoder, decoder, pad_idx, sos_idx, eos_idx, device):
         super().__init__()
 
@@ -250,7 +300,11 @@ class Seq2Seq(nn.Module):
         self.device = device
 
     def create_mask(self, src):
+        # src => [sequence_len, batch_size]
+
+        # mask is true when src value is not a pad_idx else false
         mask = (src != self.pad_idx).permute(1, 0)
+        # mask => [batch_size, sequence_len]
         return mask
 
     def forward(self, src, src_len, trg, teacher_forcing_ratio=0.5):
@@ -263,6 +317,8 @@ class Seq2Seq(nn.Module):
         if trg is None:
             inference = True
             assert teacher_forcing_ratio == 0, "Must be zero during inference"
+            # during inference input to the decoder is always <SOS> token
+            # create the trg tensor of size [max_len, batch_size] and fill it with <sos> index.
             trg = torch.zeros((100, batch_size), dtype=torch.long).fill_(self.sos_idx).to(self.device)
             # trg of shape [100, batch_size], max_len in target sequences is 100
         else:
@@ -296,6 +352,7 @@ class Seq2Seq(nn.Module):
             top1 = output.max(1)[1]
             input = (trg[t] if teacher_force else top1)
             if inference and input.item() == self.eos_idx:
+                # During inference, if the output is <eos> token, stop here and return the outputs.
                 return outputs[:t], attentions[:t]
         return outputs, attentions
 
@@ -380,7 +437,7 @@ def evaluate(model, iterator, criterion):
 N_EPOCHS = 10
 CLIP = 10
 SAVE_DIR = 'models'
-MODEL_SAVE_PATH = os.path.join(SAVE_DIR, 'tut4_model.pt')
+MODEL_SAVE_PATH = os.path.join(SAVE_DIR, 'pad_model.pt')
 
 best_valid_loss = float('inf')
 
@@ -397,3 +454,69 @@ for epoch in range(N_EPOCHS):
         torch.save(model.state_dict(), MODEL_SAVE_PATH)
 
     print(f'| Epoch: {epoch+1:03} | Train Loss: {train_loss:.3f} | Train PPL: {math.exp(train_loss):7.3f} | Val. Loss: {valid_loss:.3f} | Val. PPL: {math.exp(valid_loss):7.3f} |')
+
+SAVE_DIR = 'models'
+model.load_state_dict(torch.load(os.path.join(SAVE_DIR, 'pad_model.pt')))
+
+test_loss = evaluate(model, test_iterator, criterion)
+print(f'| Test Loss: {test_loss:.3f} | Test PPL: {math.exp(test_loss):7.3f} |')
+
+
+def translate_sentence(sentence):
+    # tokenize the sentence
+    tokenized = tokenize_de(sentence)
+
+    # lower the tokens and add <sos>, <eos> tokens
+    tokenized = ['<sos>'] + [t.lower() for t in tokenized] + ['<eos>']
+
+    # convert the tokens into numerical form
+    numericalized = [SRC.vocab.stoi[t] for t in tokenized]
+    sentence_length = torch.LongTensor([len(numericalized)]).to(device)
+
+    # convert the indexes to a tensor and add a batch dimension of 1
+    # tensor => [sentence_len, 1]
+    tensor = torch.LongTensor(numericalized).unsqueeze(1).to(device)
+
+    # target is None, teacher_forcing is 0
+    # translation_sentence_probs => [max_len, batch_size, output_dim] => [max_len, 1, output_dim]
+    translation_sentence_probs, attention = model(tensor, sentence_length, None, 0)
+
+    translation_tensor = torch.argmax(translation_sentence_probs.squeeze(1), dim=-1)
+    # translation_tensor => [max_len]
+    # ignore the first token as it is <sos>
+    translation = [TRG.vocab.itos[t] for t in translation_tensor][1:]
+
+    # ignore first attention array as well
+    return translation, attention[1:]
+
+
+def display_attention(candidate, translation, attention):
+    # attention => [max_len, batch_size, src_len]
+    fig = plt.figure()
+    ax = fig.add_subplot(111)
+    attention = attention[:len(translation)].squeeze(1).cpu().detach().numpy()
+    cax = ax.matshow(attention, cmap='bone')
+    fig.colorbar(cax)
+
+    # Set up axes
+    ax.set_xticklabels([''] + ['<sos>'] + [t.lower() for t in tokenize_de(candidate)] + ['<eos>'], rotation=90)
+    ax.set_yticklabels([''] + translation)
+
+    # Show label at every tick
+    ax.xaxis.set_major_locator(ticker.MultipleLocator(1))
+    ax.yaxis.set_major_locator(ticker.MultipleLocator(1))
+
+    plt.show()
+    plt.close()
+
+
+candidate = ' '.join(vars(train_data.examples[0])['src'])
+candidate_tranlsation = ' '.join(vars(train_data.examples[0])['trg'])
+
+print(candidate)
+print(candidate_tranlsation)
+
+translation, attention = translate_sentence(candidate)
+print(translation)
+
+display_attention(candidate, translation, attention)
