@@ -243,6 +243,17 @@ class Encoder(nn.Module):
 
 
 class DecoderLayer(nn.Module):
+    '''This is the single Decoder Layer Module.
+
+    Args:
+        hid_dim: A integer indicating the hidden dimension of the model.
+        n_heads: A integer indicating the number of self attention heads.
+        pf_dim: A integer indicating the hidden dimension of positionwise feedforward layer.
+        self_attention: SelfAttention class
+        positionwise_feedforward: PositionwiseFeedforward Class.
+        dropout: A float indicating the amount of dropout.
+        device: A device to use.
+    '''
     def __init__(self, hid_dim, n_heads, pf_dim, self_attention, positionwise_feedforward, dropout, device):
         super().__init__()
 
@@ -252,5 +263,80 @@ class DecoderLayer(nn.Module):
         self.ln = nn.LayerNorm(hid_dim)
         self.do = nn.Dropout(dropout)
 
-    def forward(self):
-        pass
+    def forward(self, trg, src, trg_mask, src_mask):
+        # trg => [batch_size, trg_len, hid_dim]
+        # src => [batch_size, src_len, hid_dim]
+        # trg_mask => [batch_size, trg_len]
+        # src_maks => [batch_size, src_len]
+
+        # self attention is calculated with the target
+        trg = self.ln(trg + self.do(self.sa(trg, trg, trg, trg_mask)))
+
+        # encoder attention is calculated with src as key, values and trg as query.
+        trg = self.ln(trg + self.do(self.ea(trg, src, src, src_mask)))
+
+        # positionwise feed forward layer of the decoder
+        trg = self.ln(trg + self.do(self.pf(trg)))
+
+        # trg => [batch_size, trg_len, batch_size]
+        return trg
+
+
+class Decoder(nn.Module):
+    '''This is the complete Decoder Module.
+
+    It stacks multiple Decoderlayers on top of each other.
+
+    Args:
+        output_dim: A integer indicating the output vocab size.
+        hid_dim: A integer indicating the hidden dimension of the model.
+        n_layers: A integer indicating the number of encoder layers in the encoder.
+        n_heads: A integer indicating the number of self attention heads.
+        pf_dim: A integer indicating the hidden dimension of positionwise feedforward layer.
+        decoder_layer: DecoderLayer class.
+        self_attention: SelfAttention Layer class.
+        positionwise_feedforward: PositionwiseFeedforward Layer class.
+        dropout: A float indicating the amount of dropout.
+        device: A device to use.
+    '''
+    def __init__(self, output_dim, hid_dim, n_layers, n_heads, pf_dim, decoder_layer, self_attention, positionwise_feedforward, dropout, device):
+        super().__init__()
+
+        self.output_dim = output_dim
+        self.hid_dim = hid_dim
+        self.n_layers = n_layers
+        self.n_heads = n_heads
+        self.pf_dim = pf_dim
+        self.decoder_layer = decoder_layer
+        self.self_attention = self_attention
+        self.positionwise_feedforward = positionwise_feedforward
+        self.device = device
+
+        self.tok_embedding = nn.Embedding(output_dim, hid_dim)
+        self.pos_embedding = nn.Embedding(1000, hid_dim)
+
+        self.layers = nn.ModuleList([decoder_layer(hid_dim, n_heads, pf_dim, self_attention, positionwise_feedforward, dropout, device) for _ in range(n_layers)])
+        self.fc = nn.Linear(hid_dim, output_dim)
+        self.do = nn.Dropout(dropout)
+        self.scale = torch.sqrt(torch.FloatTensor([hid_dim])).to(device)
+
+    def forward(self, trg, src, trg_mask, src_mask):
+        # trg => [batch_size, trg_len]
+        # src => [batch_size, src_len]
+        # trg_mask => [batch_size, trg_len]
+        # src_mask => [batch_size, src_len]
+
+        pos = torch.arange(0, trg.shape[1]).unsqueeze(0)
+        # pos => [1, trg_len]
+        pos = pos.repeat(trg.shape[0], 1).to(self.device)
+        # pos => [batch_size, trg_len]
+
+        trg = self.do((self.tok_embedding(trg)) * self.scale) + self.pos_embedding(pos)
+        # trg => [batch_size, trg_len, hid_dim]
+
+        for layer in self.layers:
+            trg = layer(trg, src, trg_mask, src_mask)
+
+        trg = self.fc(trg)
+        # trg => [batch_size, trg_len, output_dim]
+        return trg
