@@ -5,6 +5,7 @@ Reference code: https://github.com/bentrevett/pytorch-seq2seq
 
 Related Theory Blog post: https://graviraja.github.io/transformer/
 Related Implemetation Blog post: https://graviraja.github.io/transformerimp/
+Colab link: https://colab.research.google.com/drive/1695mi3IBaubysLCn6SwoG8LCXK4fb8aW
 '''
 import os
 import math
