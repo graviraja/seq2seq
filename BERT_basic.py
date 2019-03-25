@@ -76,24 +76,98 @@ class MultiHeadAttention(nn.Module):
     def __init__(self):
         super().__init__()
 
-    def forward(self):
-        pass
+        self.w_q = nn.Linear(d_model, d_model)
+        self.w_k = nn.Linear(d_model, d_model)
+        self.w_v = nn.Linear(d_model, d_model)
+
+        self.dropout = nn.Dropout(dropout)
+
+        self.fc = nn.Linear(d_model, d_model)
+
+        self.scale = torch.sqrt(torch.FloatTensor([d_model // n_heads]))
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, query, key, value, mask=None):
+        # query => [batch_size, seq_len, d_model]
+        # key => [batch_size, seq_len, d_model]
+        # value => [batch_size, seq_len, d_model]
+
+        batch_size = query.shape[0]
+
+        Q = self.w_q(query)
+        K = self.w_k(key)
+        V = self.w_v(value)
+
+        Q = Q.view(batch_size, -1, n_heads, d_model // n_heads).permute(0, 2, 1, 3)
+        K = K.view(batch_size, -1, n_heads, d_model // n_heads).permute(0, 2, 1, 3)
+        V = V.view(batch_size, -1, n_heads, d_model // n_heads).permute(0, 2, 1, 3)
+        # Q, K, V => [batch_size, n_heads, seq_len, d_model//n_heads]
+
+        energy = torch.matmul(Q, K.permute(0, 1, 3, 2)) / self.scale
+        # energy => [batch_size, n_heads, seq_len, seq_len]
+
+        if mask is not None:
+            energy = energy.masked_fill(mask == 0, -1e10)
+        attention = self.dropout(self.softmax(energy))
+        # attention => [batch_size, n_heads, seq_len, seq_len]
+
+        x = torch.matmul(attention, V)
+        # x => [batch_size, n_heads, seq_len, d_model//n_heads]
+        x = x.permute(0, 2, 1, 3).contiguous()
+
+        x = x.view(batch_size, -1, d_model)
+        # x => [batch_size, seq_len, d_model]
+
+        x = self.fc(x)
+
+        return x
 
 
 class PositionwiseFeedforward(nn.Module):
     def __init__(self):
         super().__init__()
 
-    def forward(self):
-        pass
+        # self.fc1 = nn.Linear(d_model, d_ff)
+        # self.fc2 = nn.Linear(d_ff, d_model)
+
+        self.fc1 = nn.Conv1d(d_model, d_ff, 1)
+        self.fc2 = nn.Conv1d(d_ff, d_model, 1)
+
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        # x => [batch_size, seq_len, d_model]
+
+        x = x.permute(0, 2, 1)
+        # x => [batch_size, d_model, seq_len]
+
+        x = self.dropout(gelu(self.fc1(x)))
+        # x => [batch_size, d_ff, seq_len]
+
+        x = self.fc2(x)
+        # x => [batch_size, d_model, seq_len]
+
+        x = x.permute(0, 2, 1)
+        # x => [batch_size, seq_len, d_model]
+
+        return x
 
 
 class EncoderLayer(nn.Module):
     def __init__(self):
         super().__init__()
 
-    def forward(self):
-        pass
+        self.encoder_self_attn = MultiHeadAttention()
+        self.encoder_feed_fwd = PositionwiseFeedforward()
+        self.layer_norm = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, input, input_mask):
+        # input => [batch_size, seq_len, d_model]
+
+        encoder_outputs = self.layer_norm(input + self.dropout(self.encoder_self_attn(input, input, input, input_mask)))
+        encoder_outputs = self.layer_norm(encoder_outputs + self.dropout(self.encoder_feed_fwd(encoder_outputs)))
+        return encoder_outputs
 
 
 class BERT(nn.Module):
