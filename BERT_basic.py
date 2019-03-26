@@ -67,7 +67,7 @@ class Embedding(nn.Module):
         seq_len = x.size(1)
         pos = torch.arange(seq_len, dtype=torch.long)
         pos = pos.unsqueeze(0).repeat(x.size(0), 1)
-        embedding = self.tok_embedding(x) + self.pos_embedding(x) + self.seg_embedding(x)
+        embedding = self.tok_embedding(x) + self.pos_embedding(x) + self.seg_embedding(seg)
 
         return self.dropout(self.norm(embedding))
 
@@ -162,7 +162,7 @@ class EncoderLayer(nn.Module):
         self.layer_norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, input, input_mask):
+    def forward(self, input, input_mask=None):
         # input => [batch_size, seq_len, d_model]
 
         encoder_outputs = self.layer_norm(input + self.dropout(self.encoder_self_attn(input, input, input, input_mask)))
@@ -174,8 +174,54 @@ class BERT(nn.Module):
     def __init__(self):
         super().__init__()
 
-    def forward(self):
-        pass
+        self.embedding = Embedding()
+        self.layers = nn.ModuleList([EncoderLayer() for _ in range(n_layers)])
+
+        self.nsp_linear = nn.Linear(d_model, d_model)
+        self.nsp_actv = nn.Tanh()
+
+        self.linear = nn.Linear(d_model, d_model)
+        self.activn = gelu
+        self.norm = nn.LayerNorm(d_model)
+
+        self.classifier = nn.Linear(d_model, 2)
+
+        # output layer share the same embeddings weight
+        embed_weight = self.embedding.tok_embedding.weight
+        n_vocab, n_dim = embed_weight.size()
+
+        self.decoder = nn.Linear(n_dim, n_vocab, bias=False)
+        self.decoder.weight = embed_weight
+        self.decoder_bias = nn.Parameter(torch.zeros([n_vocab]))
+
+    def forward(self, input_ids, segment_ids, masked_pos):
+        # input_ids => [batch_size, seq_len]
+        # segment_ids => [batch_size, seq_len]
+        # masked_pos => [batch_size, seq_len]
+
+        embedding_output = self.embedding(input_ids, segment_ids)
+        for layer in self.layers:
+            encoder_output = layer(embedding_output)
+        # encoder_output => [batch_size, seq_len, d_model]
+
+        # NSP
+        h_pooled = self.nsp_actv(self.nsp_linear(encoder_output[:, 0]))
+        # h_pooled => [batch_size, d_model]
+        logits_clf = self.classifier(h_pooled)
+        # logits_clf => [batch_size, 2]
+
+        # MLM
+        masked_pos = masked_pos.unsqueeze(2)
+        # masked_pos => [batch_size, seq_len, 1]
+        masked_pos = masked_pos.repeat(1, 1, d_model)
+        # masked_pos => [batch_size, seq_len, d_model]
+        h_masked = torch.gather(encoder_output, 1, masked_pos)
+        # h_masked => [batch_size, seq_len, d_model]
+        h_masked = self.norm(self.activn(self.linear(h_masked)))
+        logits_mlm = self.decoder(h_masked) + self.decoder_bias
+        # logits_mlm => [batch_size, seq_len, vocab_size]
+
+        return logits_clf, logits_mlm
 
 
 def make_batch():
@@ -189,7 +235,7 @@ def make_batch():
         tokens_a, tokens_b = token_list[tokens_a_index], token_list[tokens_b_index]
 
         # create the input by merging a and b
-        input_ids = [word_dict['[CLS]']] + tokens_a + [word_dict['SEP']] + tokens_b + [word_dict['SEP']]
+        input_ids = [word_dict['[CLS]']] + tokens_a + [word_dict['[SEP]']] + tokens_b + [word_dict['[SEP]']]
 
         # create the segment ids
         segment_ids = [0] * (1 + len(tokens_a) + 1) + [1] * (len(tokens_b) + 1)
