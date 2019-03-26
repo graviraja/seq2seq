@@ -176,3 +176,57 @@ class BERT(nn.Module):
 
     def forward(self):
         pass
+
+
+def make_batch():
+    batch = []
+    positive = negative = 0
+    while positive != batch_size / 2 or negative != batch_size / 2:
+        # randomly pick an index for a and b
+        tokens_a_index, tokens_b_index = randrange(len(sentences)), randrange(len(sentences))
+
+        # convert to tokens
+        tokens_a, tokens_b = token_list[tokens_a_index], token_list[tokens_b_index]
+
+        # create the input by merging a and b
+        input_ids = [word_dict['[CLS]']] + tokens_a + [word_dict['SEP']] + tokens_b + [word_dict['SEP']]
+
+        # create the segment ids
+        segment_ids = [0] * (1 + len(tokens_a) + 1) + [1] * (len(tokens_b) + 1)
+
+        # MASK LM
+        # 15% o the input sentence tokens
+        n_pred = min(max_pred, max(1, int(round(len(input_ids) * 0.15))))
+
+        cand_maked_pos = [i for i, token in enumerate(input_ids)]
+        shuffle(cand_maked_pos)
+        masked_tokens, masked_pos = [], []
+        for pos in cand_maked_pos[:n_pred]:
+            masked_pos.append(pos)
+            masked_tokens.append(input_ids[pos])
+            # 80% of time MASK
+            if random() < 0.8:
+                input_ids[pos] = word_dict['[MASK]']
+            # 10% of time replace with random
+            elif random() < 0.5:
+                index = randint(0, vocab_size - 1)
+                input_ids[pos] = word_dict[number_dict[index]]
+
+        # padding zeros
+        n_pad = maxlen - len(input_ids)
+        input_ids.extend([0] * n_pad)
+        segment_ids.extend([0] * n_pad)
+
+        if max_pred > n_pred:
+            n_pad = max_pred - n_pred
+            masked_tokens.extend([0] * n_pad)
+            masked_pos.extend([0] * n_pad)
+
+        if tokens_a_index + 1 == tokens_b_index and positive < batch_size / 2:
+            batch.append([input_ids, segment_ids, masked_tokens, masked_pos, True])
+            positive += 1
+        elif tokens_a_index + 1 != tokens_b_index and negative < batch_size / 2:
+            batch.append([input_ids, segment_ids, masked_tokens, masked_pos, False])
+            negative += 1
+
+    return batch
