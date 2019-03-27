@@ -276,3 +276,32 @@ def make_batch():
             negative += 1
 
     return batch
+
+
+model = BERT()
+criterion1 = nn.CrossEntropyLoss(reduction='None')
+criterion2 = nn.CrossEntropyLoss()
+optimizer = optim.Adam(model.parameters(), lr=1e-4)
+
+batch = make_batch()
+input_ids, segment_ids, masked_tokens, masked_pos, isNext = zip(*batch)
+input_ids = Variable(torch.LongTensor(input_ids))
+segment_ids = Variable(torch.LongTensor(segment_ids))
+masked_tokens = Variable(torch.LongTensor(masked_tokens))
+masked_pos = Variable(torch.LongTensor(masked_pos))
+isNext = Variable(torch.LongTensor(isNext))
+
+for epoch in range(25):
+    optimizer.zero_grad()
+    import pdb
+    pdb.set_trace()
+    logits_clf, logits_mlm = model(input_ids, segment_ids, masked_pos)
+
+    loss_clf = criterion2(logits_clf, isNext)
+    loss_mlm = criterion1(logits_mlm.transpose(1, 2), masked_tokens)
+    loss_mlm = (loss_mlm.float()).mean()
+
+    loss = loss_clf + loss_mlm
+    print('Epoch:', '%04d' % (epoch + 1), 'cost =', '{:.6f}'.format(loss))
+    loss.backward()
+    optimizer.step()
